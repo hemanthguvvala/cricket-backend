@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+
+# Virtual Environment folder
+venv/
+
+# Database files
+*.db
+*.sqlite3
+
+# VS Code settings
+.vscode/
