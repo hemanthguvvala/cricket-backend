@@ -1,10 +1,37 @@
-import aiosqlite
-from fastapi import FastAPI, HTTPException
+import os
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import List
+from databases import Database
+from dotenv import load_dotenv
+
+# Load environment variables from a .env file (for local development)
+load_dotenv()
 
 # --- Configuration ---
-DATABASE_NAME = "cricket_news.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
+# This is a secret key to prevent others from running your scraper
+# We will set this in Render's environment variables
+API_KEY = os.getenv("CRON_SECRET")
+
+if not DATABASE_URL or not API_KEY:
+    raise Exception(
+        "Missing DATABASE_URL or CRON_SECRET environment variables!")
+
+database = Database(DATABASE_URL)
+app = FastAPI()
+
+# --- Security ---
+api_key_header = APIKeyHeader(name="X-API-Key")
+
+
+async def get_api_key(api_key: str = Security(api_key_header)):
+    if api_key == API_KEY:
+        return api_key
+    else:
+        raise HTTPException(
+            status_code=403, detail="Could not validate credentials")
 
 # --- Data Models ---
 
@@ -12,93 +39,75 @@ DATABASE_NAME = "cricket_news.db"
 class Article(BaseModel):
     title: str
 
-
-# --- API Application ---
-app = FastAPI()
-
-# --- Database Setup & Teardown ---
+# --- Database Lifecycle ---
 
 
 @app.on_event("startup")
 async def startup_database():
-    """
-    This function runs when the API server starts.
-    It connects to the database and creates the 'articles' table if it doesn't exist.
-    """
-    try:
-        db = await aiosqlite.connect(DATABASE_NAME)
-        # The 'IF NOT EXISTS' part is crucial so we don't try to create the table every time
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS articles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL UNIQUE
-            )
-        """)
-        await db.commit()
-        await db.close()
-        print("Database is ready and table 'articles' is ensured.")
-    except Exception as e:
-        print(f"Error during database setup: {e}")
+    await database.connect()
+    query = "CREATE TABLE IF NOT EXISTS articles (id SERIAL PRIMARY KEY, title TEXT NOT NULL UNIQUE)"
+    await database.execute(query=query)
+    print("Connected to PostgreSQL and table 'articles' is ensured.")
+
+
+@app.on_event("shutdown")
+async def shutdown_database():
+    await database.disconnect()
+
+# --- Scraper Logic (moved from scraper.py) ---
+# We move the scraper logic directly into the API file.
+# This is simpler for deployment.
+
+
+def run_scraper_and_update_db():
+    # IMPORTANT: This is a placeholder for your actual scraper function.
+    # In a real app, you would import and call your scraper function here.
+    # For now, we simulate it finding new articles.
+    print("Scraper job started in background...")
+    # Simulate fetching headlines
+    from scraper import fetch_espn_headlines_selenium  # We can import it now
+
+    headlines = fetch_espn_headlines_selenium()
+
+    if not headlines:
+        print("Scraper found no new headlines.")
+        return
+
+    # Prepare values for bulk insert
+    values = [{"title": headline} for headline in headlines]
+
+    # This part must be async, so we run it in a separate function
+    import asyncio
+
+    async def update_db():
+        query = "INSERT INTO articles (title) VALUES (:title) ON CONFLICT (title) DO NOTHING"
+        await database.execute_many(query=query, values=values)
+        print(
+            f"Scraper finished. Updated DB with {len(values)} potential new articles.")
+
+    asyncio.run(update_db())
+
 
 # --- API Endpoints ---
-
-
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to the Cricket API. Now with a persistent SQLite database!"}
-
-# This endpoint now reads directly from the database
+    return {"message": "Welcome to the Cricket API!"}
 
 
 @app.get("/api/news", response_model=List[Article])
 async def get_news():
-    """Returns the list of all news articles from the database."""
-    try:
-        db = await aiosqlite.connect(DATABASE_NAME)
-        # We need a cursor to execute queries
-        cursor = await db.cursor()
-        # Get newest first
-        await cursor.execute("SELECT title FROM articles ORDER BY id DESC")
+    query = "SELECT title FROM articles ORDER BY id DESC"
+    rows = await database.fetch_all(query=query)
+    return [Article(title=row["title"]) for row in rows]
 
-        # Fetch all results from the query
-        rows = await cursor.fetchall()
-
-        # Format the results into our Article model
-        articles = [Article(title=row[0]) for row in rows]
-
-        await db.close()
-        return articles
-    except Exception as e:
-        print(f"Error fetching news from DB: {e}")
-        raise HTTPException(
-            status_code=500, detail="Could not fetch news from database.")
-
-# This endpoint now saves data directly to the database
+# This is the NEW endpoint UptimeRobot will call
 
 
-@app.post("/api/internal/update-news")
-async def update_news(articles: List[Article]):
+@app.post("/api/internal/trigger-scrape")
+async def trigger_scrape(background_tasks: BackgroundTasks, api_key: str = Depends(get_api_key)):
     """
-    Receives new articles from the scraper bot and saves them to the database.
-    It uses 'INSERT OR IGNORE' to avoid duplicating articles.
+    A secure endpoint to trigger a background scraping job.
     """
-    try:
-        db = await aiosqlite.connect(DATABASE_NAME)
-        print(
-            f"Received {len(articles)} articles. Saving new ones to the database.")
-
-        # 'INSERT OR IGNORE' is a powerful SQL command. If an article with the same title
-        # already exists (because of the 'UNIQUE' constraint on the title column),
-        # it will simply be ignored instead of causing an error.
-        for article in articles:
-            await db.execute("INSERT OR IGNORE INTO articles (title) VALUES (?)", (article.title,))
-
-        # Commit all the changes to the database file
-        await db.commit()
-        await db.close()
-
-        return {"status": "success", "message": "Database updated with new articles."}
-    except Exception as e:
-        print(f"Error updating news in DB: {e}")
-        raise HTTPException(
-            status_code=500, detail="Could not update database.")
+    print("Received valid request to trigger scraper.")
+    background_tasks.add_task(run_scraper_and_update_db)
+    return {"status": "success", "message": "Scraper job started in the background."}
