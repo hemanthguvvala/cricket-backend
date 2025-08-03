@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from typing import List
 from databases import Database
 from dotenv import load_dotenv
-from scraper import fetch_espn_headlines_lightweight
+from scraper import fetch_ndtv_headlines_lightweight
 
 load_dotenv()
 
@@ -51,7 +51,7 @@ def run_scraper_job():
     try:
         print("[JOB LOG]: Background job started.")
 
-        headlines = fetch_espn_headlines_lightweight()
+        headlines = fetch_ndtv_headlines_lightweight()
 
         if not headlines:
             print("[JOB LOG]: Scraper returned no headlines. Job ending.")
