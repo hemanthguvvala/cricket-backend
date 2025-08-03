@@ -1,16 +1,15 @@
 import os
+import asyncio
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Path
 from pydantic import BaseModel
 from typing import List
 from databases import Database
 from dotenv import load_dotenv
-# We need to import the scraper function
-from scraper import fetch_espn_headlines_selenium
+# --- THIS IS THE UPDATED IMPORT ---
+from scraper import fetch_espn_headlines_lightweight
 
-# Load environment variables from a .env file (for local development)
 load_dotenv()
 
-# --- Configuration ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 CRON_SECRET = os.getenv("CRON_SECRET")
 
@@ -21,13 +20,9 @@ if not DATABASE_URL or not CRON_SECRET:
 database = Database(DATABASE_URL)
 app = FastAPI()
 
-# --- Data Models ---
-
 
 class Article(BaseModel):
     title: str
-
-# --- Database Lifecycle ---
 
 
 @app.on_event("startup")
@@ -42,12 +37,13 @@ async def startup_database():
 async def shutdown_database():
     await database.disconnect()
 
-# --- Scraper Logic ---
+# --- THIS IS THE UPDATED SCRAPER LOGIC ---
 
 
 def run_scraper_and_update_db():
     print("Scraper job started in background...")
-    headlines = fetch_espn_headlines_selenium()
+    # We now call the lightweight function
+    headlines = fetch_espn_headlines_lightweight()
 
     if not headlines:
         print("Scraper found no new headlines.")
@@ -55,22 +51,19 @@ def run_scraper_and_update_db():
 
     values = [{"title": headline} for headline in headlines]
 
-    import asyncio
-
     async def update_db():
         query = "INSERT INTO articles (title) VALUES (:title) ON CONFLICT (title) DO NOTHING"
         await database.execute_many(query=query, values=values)
         print(
             f"Scraper finished. Updated DB with {len(values)} potential new articles.")
 
-    # Run the async function in the existing event loop if available
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(update_db())
-    except RuntimeError:  # 'RuntimeError: There is no current event loop...'
+    except RuntimeError:
         asyncio.run(update_db())
 
-# --- API Endpoints ---
+# --- API Endpoints (No changes below this line) ---
 
 
 @app.get("/")
@@ -84,21 +77,14 @@ async def get_news():
     rows = await database.fetch_all(query=query)
     return [Article(title=row["title"]) for row in rows]
 
-# --- THIS IS THE UPDATED ENDPOINT ---
-
 
 @app.get("/api/internal/trigger-scrape/{secret_key}")
 async def trigger_scrape(
     background_tasks: BackgroundTasks,
-    secret_key: str = Path(...)  # Get the secret key from the URL path
+    secret_key: str = Path(...)
 ):
-    """
-    A secure GET endpoint to trigger a background scraping job.
-    """
     if secret_key != CRON_SECRET:
-        # If the secret in the URL doesn't match our key, reject the request.
         raise HTTPException(status_code=403, detail="Invalid credentials")
 
-    print("Received valid request to trigger scraper.")
     background_tasks.add_task(run_scraper_and_update_db)
-    return {"status": "success", "message": "Scraper job started in the background."}
+    return {"status": "success", "message": "Lightweight scraper job started in the background."}
