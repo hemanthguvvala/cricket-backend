@@ -5,67 +5,85 @@ from pydantic import BaseModel
 from typing import List
 from databases import Database
 from dotenv import load_dotenv
-# --- THIS IS THE UPDATED IMPORT ---
 from scraper import fetch_espn_headlines_lightweight
 
 load_dotenv()
 
+# --- Configuration ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 CRON_SECRET = os.getenv("CRON_SECRET")
 
 if not DATABASE_URL or not CRON_SECRET:
     raise Exception(
-        "Missing DATABASE_URL or CRON_SECRET environment variables!")
+        "FATAL: Missing DATABASE_URL or CRON_SECRET environment variables!")
 
 database = Database(DATABASE_URL)
 app = FastAPI()
+
+# --- Data Models ---
 
 
 class Article(BaseModel):
     title: str
 
+# --- Database Lifecycle ---
+
 
 @app.on_event("startup")
 async def startup_database():
-    await database.connect()
-    query = "CREATE TABLE IF NOT EXISTS articles (id SERIAL PRIMARY KEY, title TEXT NOT NULL UNIQUE)"
-    await database.execute(query=query)
-    print("Connected to PostgreSQL and table 'articles' is ensured.")
+    try:
+        await database.connect()
+        query = "CREATE TABLE IF NOT EXISTS articles (id SERIAL PRIMARY KEY, title TEXT NOT NULL UNIQUE)"
+        await database.execute(query=query)
+        print("[API LOG]: Database connection successful.")
+    except Exception as e:
+        print(f"[!!! API ERROR !!!]: Database connection FAILED. Error: {e}")
 
 
 @app.on_event("shutdown")
 async def shutdown_database():
     await database.disconnect()
+    print("[API LOG]: Database connection closed.")
 
-# --- THIS IS THE UPDATED SCRAPER LOGIC ---
 
-
-def run_scraper_and_update_db():
-    print("Scraper job started in background...")
-    # We now call the lightweight function
-    headlines = fetch_espn_headlines_lightweight()
-
-    if not headlines:
-        print("Scraper found no new headlines.")
-        return
-
-    values = [{"title": headline} for headline in headlines]
-
-    async def update_db():
-        query = "INSERT INTO articles (title) VALUES (:title) ON CONFLICT (title) DO NOTHING"
-        await database.execute_many(query=query, values=values)
-        print(
-            f"Scraper finished. Updated DB with {len(values)} potential new articles.")
-
+# --- Scraper Logic with Full Error Handling ---
+def run_scraper_job():
     try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(update_db())
-    except RuntimeError:
+        print("[JOB LOG]: Background job started.")
+
+        headlines = fetch_espn_headlines_lightweight()
+
+        if not headlines:
+            print("[JOB LOG]: Scraper returned no headlines. Job ending.")
+            return
+
+        values = [{"title": headline} for headline in headlines]
+
+        # We need a new async function to run the database query
+        async def update_db():
+            try:
+                print(
+                    f"[JOB LOG]: Attempting to connect to DB and write {len(values)} articles...")
+                if not database.is_connected:
+                    await database.connect()
+
+                query = "INSERT INTO articles (title) VALUES (:title) ON CONFLICT (title) DO NOTHING"
+                await database.execute_many(query=query, values=values)
+                print("[JOB LOG]: Database write successful.")
+            except Exception as e:
+                print(
+                    f"[!!! JOB DB ERROR !!!]: Failed to write to database. Error: {e}")
+
+        # Run the async database update
         asyncio.run(update_db())
 
-# --- API Endpoints (No changes below this line) ---
+    except Exception as e:
+        # This will catch ANY error that happens during the job
+        print(
+            f"[!!! JOB FATAL ERROR !!!]: The background job crashed. Error: {e}")
 
 
+# --- API Endpoints ---
 @app.get("/")
 def read_root():
     return {"message": "Welcome to the Cricket API!"}
@@ -86,5 +104,5 @@ async def trigger_scrape(
     if secret_key != CRON_SECRET:
         raise HTTPException(status_code=403, detail="Invalid credentials")
 
-    background_tasks.add_task(run_scraper_and_update_db)
-    return {"status": "success", "message": "Lightweight scraper job started in the background."}
+    background_tasks.add_task(run_scraper_job)
+    return {"status": "success", "message": "Scraper job started. Check server logs for progress."}
