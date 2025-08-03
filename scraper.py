@@ -41,8 +41,12 @@ def fetch_espn_headlines_selenium():
 
 
 def send_headlines_to_api(headlines: list):
-    """Sends the headlines to our FastAPI server."""
-    API_ENDPOINT = "http://127.0.0.1:8000/api/internal/update-news"
+    """
+    Sends the headlines to our FastAPI server.
+    """
+    # --- THIS IS THE FIX ---
+    # The bot will now send data to your live API on the internet.
+    API_ENDPOINT = "https://cricket-backend-dh99.onrender.com/api/internal/update-news"
     formatted_articles = [{"title": h} for h in headlines]
     try:
         print(f"Bot: Sending {len(formatted_articles)} articles to the API...")
